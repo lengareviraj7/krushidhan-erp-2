@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "splash-minimal",
+  "description": "Minimal locked-down capability for local launcher splash window (no shell or fs permissions).",
+  "windows": ["splash"],
+  "permissions": [
+    "core:window:default"
+  ]
+}

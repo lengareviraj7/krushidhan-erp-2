@@ -12,14 +12,50 @@ from src.repositories.base_repository import BaseRepository
 class PurchaseRepository(BaseRepository):
     """Repository for managing purchase transactions and purchase returns."""
 
-    def create_purchase(self, purchase: Purchase, conn: Optional[sqlite3.Connection] = None) -> int:
+    def get_purchase_by_idempotency_key(
+        self, idempotency_key: str, conn: Optional[sqlite3.Connection] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Look up an existing purchase by its idempotency_key on the supplied or standalone connection."""
+        sql = """
+            SELECT purchase_id, invoice_no, request_fingerprint
+            FROM purchases
+            WHERE idempotency_key = ?;
+        """
+        executor = conn if conn is not None else self.db.get_connection()
+        cursor: Optional[sqlite3.Cursor] = None
+        try:
+            cursor = executor.cursor()
+            cursor.execute(sql, (idempotency_key,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if conn is None:
+                executor.close()
+
+    def create_purchase(
+        self,
+        purchase: Purchase,
+        conn: Optional[sqlite3.Connection] = None,
+        request_fingerprint: Optional[str] = None,
+    ) -> int:
         """Persist purchase invoice header and all line items."""
+        cleaned_inv = (purchase.invoice_no or "").strip()
+        if not cleaned_inv:
+            raise ValueError("Purchase invoice_no is required and cannot be blank.")
+        purchase.invoice_no = cleaned_inv
+
         sql_head = """
             INSERT INTO purchases (
                 invoice_no, purchase_date, supplier_id, challan_no, payment_type,
                 total_taxable, total_cgst, total_sgst, total_igst, extra_charges,
-                round_off, net_amount, paid_amount, due_amount, remarks
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                round_off, net_amount, paid_amount, due_amount, remarks,
+                idempotency_key, request_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         sql_item = """
             INSERT INTO purchase_items (
@@ -32,6 +68,7 @@ class PurchaseRepository(BaseRepository):
         """
 
         executor = conn if conn is not None else self.db.get_connection()
+        cursor: Optional[sqlite3.Cursor] = None
         try:
             cursor = executor.cursor()
             cursor.execute(
@@ -52,6 +89,8 @@ class PurchaseRepository(BaseRepository):
                     purchase.paid_amount,
                     purchase.due_amount,
                     purchase.remarks,
+                    purchase.idempotency_key,
+                    request_fingerprint if purchase.idempotency_key else None,
                 ),
             )
             purchase_id = cursor.lastrowid
@@ -88,6 +127,11 @@ class PurchaseRepository(BaseRepository):
                 executor.commit()
             return purchase_id
         finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
             if conn is None:
                 executor.close()
 
@@ -98,6 +142,7 @@ class PurchaseRepository(BaseRepository):
             return None
 
         purchase_dict = dict(row)
+        purchase_dict.pop("request_fingerprint", None)
         item_rows = self.db.fetch_all(
             "SELECT * FROM purchase_items WHERE purchase_id = ? ORDER BY item_id ASC;",
             (purchase_id,),

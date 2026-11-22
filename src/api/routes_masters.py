@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from src.db.connection import get_db_manager
+from src.db.connection import DatabaseMaintenanceError, get_db_manager
 from src.models.master_data import Category, Crop, Customer, Manufacturer, Product, Supplier, Unit
 from src.repositories.master_data_repository import MasterDataRepository
 
@@ -30,6 +30,8 @@ def create_manufacturer(mfg: Manufacturer):
     try:
         mfg_id = repo.get_or_create_manufacturer(mfg.manufacturer_name, mfg.contact_person, mfg.mobile, mfg.address)
         return {"success": True, "manufacturer_id": mfg_id, "manufacturer_name": mfg.manufacturer_name}
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -40,6 +42,8 @@ def create_unit(unit: Unit):
     try:
         unit_id = repo.create_unit(unit)
         return {"success": True, "unit_id": unit_id, "unit_name": unit.unit_name, "symbol": unit.symbol or unit.unit_name}
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -54,8 +58,18 @@ def list_products(query: str = ""):
 def create_product(product: Product):
     repo = MasterDataRepository(get_db_manager())
     try:
+        if not product.tax_group_id or product.tax_group_id <= 0:
+            raise HTTPException(status_code=400, detail="A valid tax_group_id is required.")
+        tax_group = repo.get_tax_group_by_id(product.tax_group_id)
+        if not tax_group or not tax_group.is_active:
+            raise HTTPException(status_code=400, detail="Selected tax group does not exist or is inactive.")
+
         prod_id = repo.create_product(product)
         return {"success": True, "product_id": prod_id}
+    except HTTPException:
+        raise
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -68,6 +82,8 @@ def delete_product(product_id: int):
         if not success:
             raise HTTPException(status_code=404, detail="Product not found")
         return {"success": True, "message": "Product deleted successfully"}
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -105,6 +121,8 @@ def create_customer(customer: Customer):
     try:
         cust_id = repo.create_customer(customer)
         return {"success": True, "customer_id": cust_id, "customer_name": customer.customer_name}
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -121,5 +139,7 @@ def create_supplier(supplier: Supplier):
     try:
         supp_id = repo.create_supplier(supplier)
         return {"success": True, "supplier_id": supp_id, "supplier_name": supplier.supplier_name}
+    except DatabaseMaintenanceError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

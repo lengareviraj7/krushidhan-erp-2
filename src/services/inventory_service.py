@@ -123,20 +123,26 @@ class InventoryService:
         if qty <= 0:
             raise ValueError("Quantity to add must be greater than 0.")
 
-        product = self.db.fetch_one("SELECT * FROM products WHERE product_id = ?;", (product_id,))
-        if not product:
-            raise ValueError(f"Product with ID {product_id} does not exist.")
-
         batch_code = (batch_no or "").strip()
         if not batch_code:
             today_str = datetime.now().strftime("%y%m%d")
             batch_code = f"STK-{today_str}-{product_id}"
 
-        pur_rate = float(purchase_rate) if purchase_rate is not None and purchase_rate > 0 else float(product["default_purchase_rate"] or 0.0)
-        s_rate = float(sale_rate) if sale_rate is not None and sale_rate > 0 else float(product["default_sale_rate"] or 0.0)
-        m_rate = float(mrp) if mrp is not None and mrp > 0 else float(product["default_mrp"] or s_rate)
+        with self.db.transaction(mode="IMMEDIATE") as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("SELECT * FROM products WHERE product_id = ?;", (product_id,))
+                product = cursor.fetchone()
+            finally:
+                cursor.close()
+            if not product:
+                raise ValueError(f"Product with ID {product_id} does not exist.")
 
-        with self.db.transaction() as conn:
+            pur_rate = float(purchase_rate) if purchase_rate is not None and purchase_rate > 0 else float(product["default_purchase_rate"] or 0.0)
+            s_rate = float(sale_rate) if sale_rate is not None and sale_rate > 0 else float(product["default_sale_rate"] or 0.0)
+            m_rate = float(mrp) if mrp is not None and mrp > 0 else float(product["default_mrp"] or s_rate)
+            product_name = product["product_name"]
+
             batch = StockBatch(
                 product_id=product_id,
                 batch_no=batch_code,
@@ -168,12 +174,12 @@ class InventoryService:
         return {
             "success": True,
             "product_id": product_id,
-            "product_name": product["product_name"],
+            "product_name": product_name,
             "batch_id": batch_id,
             "batch_no": batch_code,
             "added_qty": qty,
             "purchase_rate": pur_rate,
             "sale_rate": s_rate,
-            "message": f"Successfully added {qty} stock for {product['product_name']}",
+            "message": f"Successfully added {qty} stock for {product_name}",
         }
 

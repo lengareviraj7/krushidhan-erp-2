@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-sidecar-runtime"
+description = "Enables the get_sidecar_runtime command without any pre-configured scope."
+commands.allow = ["get_sidecar_runtime"]
+
+[[permission]]
+identifier = "deny-get-sidecar-runtime"
+description = "Denies the get_sidecar_runtime command without any pre-configured scope."
+commands.deny = ["get_sidecar_runtime"]

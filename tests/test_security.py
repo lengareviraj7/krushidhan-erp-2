@@ -5,23 +5,28 @@ Verifies JWT session token generation, API route protection, password hashing, a
 import pytest
 from fastapi.testclient import TestClient
 from src.app import app
-from src.db.connection import get_db_manager
+from src.db.connection import get_db_manager, reset_db_manager
 from src.services.auth_service import AuthService
 
 
 @pytest.fixture(autouse=True)
-def init_test_database():
-    """Initialize in-memory or fresh DB for tests."""
-    db = get_db_manager(":memory:")
+def init_test_database(tmp_path, monkeypatch):
+    """Initialize isolated fresh DB for each security test."""
+    db_file = tmp_path / "test_security_agri_erp.db"
+    monkeypatch.setenv("DB_PATH", str(db_file))
+    reset_db_manager()
+    db = get_db_manager()
     db.initialize_database(include_seed=True)
     auth_svc = AuthService(db)
     auth_svc.ensure_bootstrap_users()
     yield db
+    reset_db_manager()
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 def test_unauthenticated_api_access_blocked(client):
@@ -63,7 +68,9 @@ def test_login_success_and_jwt_token_issuance(client):
     assert "token" in data
     assert data["user"]["username"] == "admin"
     assert data["user"]["role"] == "ADMIN"
-    assert "श्री कृषीधन" in data["shop"]["name"]
+    assert "Krishi" in data["shop"]["name"]
+    assert data["shop"]["owner"] == ""
+    assert data["shop"]["contact"] == ""
 
 
 def test_authenticated_api_access_allowed(client):

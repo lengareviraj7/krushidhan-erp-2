@@ -2,8 +2,13 @@
 Domain Data Models for Chart of Accounts, Vouchers, Ledger Entries, and Expenses.
 """
 from __future__ import annotations
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from src.idempotency import (
+    reject_client_request_fingerprint,
+    validate_optional_idempotency_key,
+)
 
 
 class LedgerAccount(BaseModel):
@@ -36,8 +41,19 @@ class Voucher(BaseModel):
     narration: Optional[str] = None
     reference_type: Optional[str] = None  # 'SALE', 'PURCHASE', 'EXPENSE', 'MANUAL'
     reference_id: Optional[int] = None
+    idempotency_key: Optional[str] = None
     entries: List[LedgerEntry] = Field(default_factory=list)
     created_at: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_untrusted_fingerprint(cls, data: Any) -> Any:
+        return reject_client_request_fingerprint(data)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def _validate_idempotency_key(cls, v: Any) -> Optional[str]:
+        return validate_optional_idempotency_key(v)
 
 
 class ExpenseCategory(BaseModel):
@@ -51,9 +67,20 @@ class Expense(BaseModel):
     expense_id: Optional[int] = None
     category_id: int
     category_name: Optional[str] = None
-    expense_date: str
+    expense_date: Optional[str] = None
     amount: float
     payment_account_id: Optional[int] = None
     reference_no: Optional[str] = None
     remarks: Optional[str] = None
+    idempotency_key: Optional[str] = None
     created_at: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_untrusted_fingerprint(cls, data: Any) -> Any:
+        return reject_client_request_fingerprint(data)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def _validate_idempotency_key(cls, v: Any) -> Optional[str]:
+        return validate_optional_idempotency_key(v)

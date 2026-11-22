@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from src.db.connection import get_db_manager
+from src.db.connection import DatabaseMaintenanceError, get_db_manager
 from src.repositories.inventory_repository import InventoryRepository
 from src.services.inventory_service import InventoryService
 
@@ -67,6 +67,8 @@ def add_direct_stock(payload: DirectAddStockRequest):
             remarks=payload.remarks,
         )
         return res
+    except DatabaseMaintenanceError:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -7,12 +7,15 @@ from src.services.backup_service import BackupService
 from src.services.gst_service import GSTService
 from src.services.inventory_service import InventoryService
 from src.services.purchase_service import PurchaseService
+from src.services.purchase_return_service import IdempotencyConflictError, PurchaseReturnService
 from src.services.report_service import ReportService
 from src.services.sales_service import SalesService
 
 __all__ = [
     "InventoryService",
     "PurchaseService",
+    "PurchaseReturnService",
+    "IdempotencyConflictError",
     "SalesService",
     "AccountingService",
     "GSTService",

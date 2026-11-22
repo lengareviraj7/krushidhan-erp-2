@@ -274,5 +274,8 @@ def test_backup_and_restore(service_env):
 
     # Verify backup history recorded
     history = backup_svc.get_backup_history()
-    assert len(history) == 1
-    assert history[0]["status"] == "SUCCESS"
+    assert len(history) >= 1
+    manual_records = [h for h in history if h["file_path"] == str(backup_file)]
+    assert len(manual_records) == 1
+    assert manual_records[0]["backup_type"] == "MANUAL"
+    assert manual_records[0]["status"] == "SUCCESS"

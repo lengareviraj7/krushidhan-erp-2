@@ -14,9 +14,46 @@ htmlcov/
 .vscode/
 *.swp
 
-# SQLite runtime files (keep seed database template if needed)
+# SQLite runtime database & sidecar files (preserve SQL schema/seed templates)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/*.sqlite
+data/*.sqlite3
+data/*.sqlite-wal
+data/*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.pre_restore_raw.bak
+
+# Database backups (legacy & local backup folders)
+backups/
 data/backups/
 .vercel
 
-# Environment secrets (never commit)
+# Environment & runtime instance secrets (never commit)
 .env
+.env.*
+data/.jwt_secret
+*.jwt_secret
+
+# PyInstaller build artifacts & local logs
+build/
+dist/
+*.egg-info/
+logs/
+
+# Tauri Rust compiled artifacts & generated schemas
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri sidecar binaries (build outputs)
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep

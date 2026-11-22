@@ -31,31 +31,31 @@ INSERT OR IGNORE INTO tax_groups (tax_group_id, tax_group_name, cgst_rate, sgst_
 
 -- 4. Standard Product Categories
 INSERT OR IGNORE INTO categories (category_id, category_name, short_name, is_hardware_category) VALUES
-(1, 'Chemical Fertilizers (रासायनिक खते)', 'FERT', 0),
-(2, 'Hybrid & Certified Seeds (बियाणे)', 'SEED', 0),
-(3, 'Insecticides & Pesticides (कीटकनाशके)', 'PEST', 0),
-(4, 'Fungicides & Herbicides (बुरशीनाशके / तणनाशके)', 'FUNG', 0),
-(5, 'Plant Growth Regulators & Bio-Stimulants (टॉनिक / बायो)', 'PGR', 0),
-(6, 'Agricultural Hardware & Drip (कृषी उपकरणे / ठिबक)', 'HARD', 1);
+(1, 'Chemical Fertilizers', 'FERT', 0),
+(2, 'Hybrid & Certified Seeds', 'SEED', 0),
+(3, 'Insecticides & Pesticides', 'PEST', 0),
+(4, 'Fungicides & Herbicides', 'FUNG', 0),
+(5, 'Plant Growth Regulators & Bio-Stimulants', 'PGR', 0),
+(6, 'Agricultural Hardware & Drip', 'HARD', 1);
 
 -- 5. Standard Crops
 INSERT OR IGNORE INTO crops (crop_id, crop_name, description) VALUES
-(1, 'Sugarcane (ऊस)', 'Cash crop with high fertilizer requirement'),
-(2, 'Cotton (कापूस)', 'Pest sensitive commercial crop'),
-(3, 'Soybean (सोयाबीन)', 'Kharif oilseed crop'),
-(4, 'Wheat (गहू)', 'Rabi cereal crop'),
-(5, 'Onion (कांदा)', 'High fungicide and fertilizer demand'),
-(6, 'Tomato (टोमॅटो)', 'Horticulture crop'),
-(7, 'Grapes (द्राक्षे)', 'Export quality horticulture crop'),
-(8, 'Pomegranate (डाळिंब)', 'Horticulture fruit crop'),
-(9, 'Maize (मका)', 'Cereal and fodder crop'),
-(10, 'Chilli (मिरची)', 'Vegetable & spice crop');
+(1, 'Sugarcane', 'Cash crop with high fertilizer requirement'),
+(2, 'Cotton', 'Pest sensitive commercial crop'),
+(3, 'Soybean', 'Kharif oilseed crop'),
+(4, 'Wheat', 'Rabi cereal crop'),
+(5, 'Onion', 'High fungicide and fertilizer demand'),
+(6, 'Tomato', 'Horticulture crop'),
+(7, 'Grapes', 'Export quality horticulture crop'),
+(8, 'Pomegranate', 'Horticulture fruit crop'),
+(9, 'Maize', 'Cereal and fodder crop'),
+(10, 'Chilli', 'Vegetable & spice crop');
 
 -- 6. Standard Customer Groups
 INSERT OR IGNORE INTO customer_groups (group_id, group_name, discount_percent) VALUES
-(1, 'Retail Farmer (किरकोळ शेतकरी)', 0.0),
-(2, 'Wholesale Buyer (घाऊक व्यापारी)', 2.0),
-(3, 'Grampanchayat / Krishi Mandal (कृषी संस्था)', 5.0);
+(1, 'Retail Farmer', 0.0),
+(2, 'Wholesale Buyer', 2.0),
+(3, 'Farmer Cooperative / Institution', 5.0);
 
 -- 7. Standard Indian Agri-Input Manufacturers / Brands
 INSERT OR IGNORE INTO manufacturers (manufacturer_id, manufacturer_name, contact_person, mobile) VALUES
@@ -79,7 +79,7 @@ INSERT OR IGNORE INTO ledger_accounts (account_id, account_name, account_group, 
 (3, 'Sales Account', 'INCOME', 1),
 (4, 'Purchase Account', 'EXPENSE', 1),
 (5, 'Sales Return Account', 'EXPENSE', 1),
-(6, 'Purchase Return Account', 'INCOME', 1),
+(6, 'Purchase Return Account', 'EXPENSE', 1),
 (7, 'CGST Output Account', 'LIABILITIES', 1),
 (8, 'SGST Output Account', 'LIABILITIES', 1),
 (9, 'IGST Output Account', 'LIABILITIES', 1),
@@ -88,43 +88,49 @@ INSERT OR IGNORE INTO ledger_accounts (account_id, account_name, account_group, 
 (12, 'IGST Input Account', 'ASSETS', 1),
 (13, 'Discount Allowed Account', 'EXPENSE', 1),
 (14, 'Discount Received Account', 'INCOME', 1),
-(15, 'Round Off Account', 'EXPENSE', 1);
+(15, 'Round Off Account', 'EXPENSE', 1),
+(16, 'Sundry Debtors', 'ASSETS', 1),
+(17, 'Sundry Creditors', 'LIABILITIES', 1),
+(18, 'Operating Expenses', 'EXPENSE', 1);
+
+INSERT OR IGNORE INTO ledger_accounts (account_name, account_group, is_system) VALUES
+('Supplier Credits Receivable', 'ASSETS', 1),
+('ITC Reversal Suspense Account', 'LIABILITIES', 1);
 
 -- 9. Standard Expense Categories
 INSERT OR IGNORE INTO expense_categories (category_id, category_name, description) VALUES
-(1, 'Shop Rent (दुकान भाडे)', 'Monthly premises rental'),
-(2, 'Electricity Bill (वीज बिल)', 'Power and electricity expenses'),
-(3, 'Staff Salaries & Wages (हमाली / मजुरी)', 'Employee salaries and daily labor'),
-(4, 'Freight & Transportation (वाहतूक खर्च)', 'Goods inward and delivery transport'),
-(5, 'Tea, Water & Refreshments (चहा / आदरातिथ्य)', 'Shop hospitality expenses'),
-(6, 'Stationery & Printing (स्टेशनरी / छपाई)', 'Billing paper, toner and shop supplies');
+(1, 'Shop Rent', 'Monthly premises rental'),
+(2, 'Electricity Bill', 'Power and electricity expenses'),
+(3, 'Staff Salaries & Wages', 'Employee salaries and daily labor'),
+(4, 'Freight & Transportation', 'Goods inward and delivery transport'),
+(5, 'Tea, Water & Refreshments', 'Shop hospitality expenses'),
+(6, 'Stationery & Printing', 'Billing paper, toner and shop supplies');
 
--- 10. Real Company Profile — Krushidhan Krushi Udyog Samuh
+-- 10. Neutral Default Demo Shop Profile (never ships personal developer details)
 INSERT OR IGNORE INTO company_settings (
     setting_id, company_name, address, city, state, pincode, mobile, email,
     gstin, dl_fertilizer, dl_pesticide, dl_seed,
     bank_name, account_no, ifsc_code, invoice_terms, default_invoice_size
 ) VALUES (
     1,
-    'कृषीधन कृषी उद्योग समूह',
-    'गट नं. १/७, घर नं. २५२, नागोबा कट्ट्याशेजारी, विसापूर, ता. तासगाव, जि. सांगली',
-    'विसापूर, ता. तासगाव, जि. सांगली',
+    'Krishi Agri-Input Shop (Demo)',
+    'Sample Market Yard Road',
+    'Sample City',
     'Maharashtra',
-    '416314',
-    '9503573620 / 7218409780',
-    'akashlengare15@gmail.com',
-    '27BSXPL3414R1Z5',
-    'LCFRD0920250506SNG',
-    'LCID0920250497SNG',
-    'LCSD0920250506SNG',
-    'IDBI Bank',
-    '409002609103',
-    'IBKL0000055',
-    '१. बिलामधील नमूद केलेली कीटकनाशके मी माझ्या मर्जीने घेतलेली आहेत.\n२. उत्पादनाची हमी संबंधित उत्पादक कंपनीची राहील.\n३. सर्व वाद तासगाव / सांगली न्यायालयाच्या कार्यक्षेत्रात.\n४. माल एकदा विकल्यानंतर परत घेतला जाणार नाही.\n५. उधारीचा व्यवहार ३० दिवसांत पूर्ण करावा.',
+    '400001',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    '1. Goods checked and verified against invoice quantities and batches at the time of delivery.\n2. Product warranty/quality responsibility lies with the respective manufacturer.\n3. Subject to local jurisdiction only.',
     'A4'
 );
 
--- 11. Default Admin & Owner Users (Default Password: krushidhan@2026)
+-- 11. Default Dev/Test Admin User (local/test modes only — desktop mode uses seed_clean.sql)
 INSERT OR IGNORE INTO users (user_id, username, password_hash, full_name, role, is_active) VALUES
-(1, 'admin', '7adeac2dfbc21f07e8a90a6a84309007e8a77d04c9008d19d8758633ff8e3304', 'आकाश लेंगारे (Admin)', 'ADMIN', 1),
-(2, 'akash', '7adeac2dfbc21f07e8a90a6a84309007e8a77d04c9008d19d8758633ff8e3304', 'आकाश लेंगारे', 'ADMIN', 1);
+(1, 'admin', '7adeac2dfbc21f07e8a90a6a84309007e8a77d04c9008d19d8758633ff8e3304', 'Shop Admin', 'ADMIN', 1);

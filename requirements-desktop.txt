@@ -1,0 +1,16 @@
+# Lean runtime dependencies for the Krushidhan ERP desktop sidecar executable.
+# Excludes test frameworks (pytest, httpx) and Vercel-only cloud sync drivers (pymongo).
+# Recommended Windows production build target: Python 3.11 or 3.12 (compatible with >=3.9).
+pydantic>=2.0.0
+reportlab>=4.0.0,<4.4.4; python_version < "3.10"
+reportlab>=4.0.0,<6.0.0; python_version >= "3.10"
+bcrypt>=4.0.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+jinja2>=3.1.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+openpyxl==3.1.5
+defusedxml==0.7.1
+cryptography==44.0.3
+keyring==25.7.0; sys_platform == "darwin"

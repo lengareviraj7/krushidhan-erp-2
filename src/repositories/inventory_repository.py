@@ -113,7 +113,7 @@ class InventoryRepository(BaseRepository):
                 if row:
                     b = StockBatch(**dict(row))
                     if b.current_qty < sale_qty:
-                        raise ValueError(f"निवडलेल्या बॅचमध्ये साठा अपुरा आहे (Insufficient batch stock: available {b.current_qty}, requested {sale_qty}).")
+                        raise ValueError(f"Insufficient batch stock: available {b.current_qty}, requested {sale_qty}.")
                     return b
 
             if batch_no and batch_no != "N/A":
@@ -122,7 +122,7 @@ class InventoryRepository(BaseRepository):
                 if row:
                     b = StockBatch(**dict(row))
                     if b.current_qty < sale_qty:
-                        raise ValueError(f"निवडलेल्या बॅचमध्ये साठा अपुरा आहे (Insufficient batch stock: available {b.current_qty}, requested {sale_qty}).")
+                        raise ValueError(f"Insufficient batch stock: available {b.current_qty}, requested {sale_qty}.")
                     return b
 
             # Try active FEFO batch with sufficient quantity
@@ -152,7 +152,7 @@ class InventoryRepository(BaseRepository):
                 return StockBatch(**dict(row))
 
             # If no available stock batch exists, reject sale. NO PHANTOM BATCH CREATION!
-            raise ValueError(f"उत्पादनासाठी साठा उपलब्ध नाही (Insufficient stock available for Product ID {product_id}).")
+            raise ValueError(f"Insufficient stock available for Product ID {product_id}.")
         finally:
             if conn is None:
                 executor.close()
@@ -185,7 +185,7 @@ class InventoryRepository(BaseRepository):
             
             curr_qty = float(row["current_qty"])
             if curr_qty < qty_to_deduct:
-                raise ValueError(f"साठा अपुरा आहे (Insufficient stock in batch '{row['batch_no']}': available {curr_qty}, requested {qty_to_deduct}).")
+                raise ValueError(f"Insufficient stock in batch '{row['batch_no']}': available {curr_qty}, requested {qty_to_deduct}.")
 
             sql = "UPDATE stock_batches SET current_qty = current_qty - ? WHERE batch_id = ?;"
             cursor.execute(sql, (qty_to_deduct, batch_id))

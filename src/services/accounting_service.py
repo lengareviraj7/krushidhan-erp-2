@@ -4,11 +4,85 @@ Service Layer for Accounting Operations, Vouchers, Day Book, and Financial State
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+import sqlite3
+from typing import Any, Dict, List, Optional, Tuple
 from src.db.connection import DatabaseManager, get_db_manager
+from src.idempotency import (
+    IdempotencyConflictError,
+    clean_str,
+    decimal_to_paise,
+    sha256_canonical_json,
+    validate_optional_idempotency_key,
+)
 from src.models.accounting import Expense, LedgerEntry, Voucher
 from src.repositories.accounting_repository import AccountingRepository
 from src.repositories.master_data_repository import MasterDataRepository
+
+_UNSET = object()
+
+
+def _compute_customer_receipt_fingerprint(
+    *,
+    customer_id: int,
+    raw_receipt_date: Optional[str],
+    amount: float,
+    payment_mode: str,
+    narration: Optional[str],
+) -> str:
+    payload = {
+        "operation": "CUSTOMER_RECEIPT",
+        "customer_id": int(customer_id),
+        "receipt_date": clean_str(raw_receipt_date),
+        "amount_paise": decimal_to_paise(amount),
+        "payment_mode": (clean_str(payment_mode) or "CASH").upper(),
+        "narration": clean_str(narration),
+    }
+    return sha256_canonical_json(payload)
+
+
+def _compute_supplier_payment_fingerprint(
+    *,
+    supplier_id: int,
+    raw_payment_date: Optional[str],
+    amount: float,
+    payment_mode: str,
+    reference_no: Optional[str],
+    narration: Optional[str],
+) -> str:
+    payload = {
+        "operation": "SUPPLIER_PAYMENT",
+        "supplier_id": int(supplier_id),
+        "payment_date": clean_str(raw_payment_date),
+        "amount_paise": decimal_to_paise(amount),
+        "payment_mode": (clean_str(payment_mode) or "BANK_TRANSFER").upper(),
+        "reference_no": clean_str(reference_no),
+        "narration": clean_str(narration),
+    }
+    return sha256_canonical_json(payload)
+
+
+def _compute_shop_expense_fingerprint(
+    *,
+    category_id: int,
+    amount: float,
+    raw_expense_date: Optional[str],
+    payment_mode: Optional[str],
+    payment_account_id: Optional[int],
+    reference_no: Optional[str],
+    remarks: Optional[str],
+) -> str:
+    norm_mode = clean_str(payment_mode)
+    payload = {
+        "operation": "SHOP_EXPENSE",
+        "category_id": int(category_id),
+        "amount_paise": decimal_to_paise(amount),
+        "expense_date": clean_str(raw_expense_date),
+        "payment_mode": norm_mode.upper() if norm_mode else None,
+        "payment_account_id": int(payment_account_id) if payment_account_id is not None else None,
+        "reference_no": clean_str(reference_no),
+        "remarks": clean_str(remarks),
+    }
+    return sha256_canonical_json(payload)
 
 
 class AccountingService:
@@ -19,139 +93,462 @@ class AccountingService:
         self.accounting_repo = AccountingRepository(self.db)
         self.master_repo = MasterDataRepository(self.db)
 
+    def record_customer_receipt_with_status(
+        self,
+        customer_id: int,
+        receipt_date: Optional[str] = None,
+        amount: float = 0.0,
+        payment_mode: str = "CASH",
+        narration: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Tuple[int, str, bool]:
+        """
+        Record receipt from customer atomically with optional idempotency protection:
+        1. Validate idempotency key and compute canonical fingerprint BEFORE defaulting receipt_date.
+        2. Inside BEGIN IMMEDIATE, replay existing voucher on matching key/fingerprint or raise 409 on conflict.
+        3. Verify customer exists before any writes.
+        4. Reduce customer current_balance and post balanced RECEIPT voucher atomically.
+        Returns (voucher_id, voucher_no, idempotent_replay).
+        """
+        validated_key = validate_optional_idempotency_key(idempotency_key)
+        if amount <= 0:
+            raise ValueError("Receipt amount must be greater than 0.")
+
+        fingerprint = _compute_customer_receipt_fingerprint(
+            customer_id=customer_id,
+            raw_receipt_date=receipt_date,
+            amount=amount,
+            payment_mode=payment_mode,
+            narration=narration,
+        )
+
+        try:
+            with self.db.transaction(mode="IMMEDIATE") as conn:
+                if validated_key is not None:
+                    existing = self.accounting_repo.get_voucher_by_idempotency_key(validated_key, conn=conn)
+                    if existing is not None:
+                        if existing.get("request_fingerprint") == fingerprint:
+                            return int(existing["voucher_id"]), str(existing["voucher_no"]), True
+                        raise IdempotencyConflictError(
+                            f"Idempotency key '{validated_key}' was already used with a different request payload."
+                        )
+
+                # Validate customer existence before any balance or voucher writes
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT customer_id FROM customers WHERE customer_id = ?;", (customer_id,))
+                    cust_row = cursor.fetchone()
+                finally:
+                    cursor.close()
+                if not cust_row:
+                    raise ValueError(f"Customer ID {customer_id} not found.")
+
+                final_date = clean_str(receipt_date) or datetime.now().strftime("%Y-%m-%d")
+
+                cash_ac = self.accounting_repo.get_cash_account(conn=conn)
+                bank_ac = self.accounting_repo.get_bank_account(conn=conn)
+                debtors_ac = self.accounting_repo.get_debtors_account(conn=conn)
+                pay_ac = cash_ac if (clean_str(payment_mode) or "CASH").upper() in ("CASH", "SPLIT") else bank_ac
+
+                # Reduce customer balance
+                self.master_repo.update_customer_balance(customer_id, -amount, conn=conn)
+
+                vch_no = self.accounting_repo.generate_next_voucher_no("RECEIPT", conn=conn)
+                entries = [
+                    LedgerEntry(
+                        account_id=pay_ac.account_id,
+                        debit_amount=round(amount, 2),
+                        credit_amount=0.0,
+                        particulars=f"Receipt from Customer #{customer_id}",
+                    ),
+                    LedgerEntry(
+                        account_id=debtors_ac.account_id,
+                        debit_amount=0.0,
+                        credit_amount=round(amount, 2),
+                        particulars=f"Credit to Customer #{customer_id}",
+                    ),
+                ]
+                voucher = Voucher(
+                    voucher_no=vch_no,
+                    voucher_date=final_date,
+                    voucher_type="RECEIPT",
+                    total_amount=round(amount, 2),
+                    narration=narration or f"Payment received from customer #{customer_id}",
+                    reference_type="MANUAL",
+                    reference_id=customer_id,
+                    idempotency_key=validated_key,
+                    entries=entries,
+                )
+                if validated_key is not None:
+                    vch_id = self.accounting_repo.create_voucher(
+                        voucher,
+                        conn=conn,
+                        idempotency_key=validated_key,
+                        request_fingerprint=fingerprint,
+                    )
+                else:
+                    vch_id = self.accounting_repo.create_voucher(voucher, conn=conn)
+                return vch_id, vch_no, False
+        except sqlite3.IntegrityError:
+            if validated_key is not None:
+                existing = self.accounting_repo.get_voucher_by_idempotency_key(validated_key)
+                if existing is not None:
+                    if existing.get("request_fingerprint") == fingerprint:
+                        return int(existing["voucher_id"]), str(existing["voucher_no"]), True
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{validated_key}' was already used with a different request payload."
+                    )
+            raise
+
     def record_customer_receipt(
         self,
         customer_id: int,
-        receipt_date: str,
-        amount: float,
+        receipt_date: Optional[str] = None,
+        amount: float = 0.0,
         payment_mode: str = "CASH",
         narration: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> int:
-        """
-        Record receipt from customer:
-        1. Reduce customer current_balance.
-        2. Post double-entry voucher (Debit Cash/Bank, Credit Accounts Receivable/Customer).
-        """
-        cash_ac = self.accounting_repo.get_account_by_name("Cash in Hand")
-        bank_ac = self.accounting_repo.get_account_by_name("Bank Account")
-        pay_ac = cash_ac if payment_mode == "CASH" else bank_ac
+        """Record receipt from customer and return voucher_id (backward-compatible wrapper)."""
+        vch_id, _vch_no, _is_replay = self.record_customer_receipt_with_status(
+            customer_id=customer_id,
+            receipt_date=receipt_date,
+            amount=amount,
+            payment_mode=payment_mode,
+            narration=narration,
+            idempotency_key=idempotency_key,
+        )
+        return vch_id
 
-        with self.db.transaction() as conn:
-            # Reduce customer balance
-            self.master_repo.update_customer_balance(customer_id, -amount, conn=conn)
+    def record_supplier_payment_with_status(
+        self,
+        supplier_id: int,
+        arg1: Any = None,
+        arg2: Any = None,
+        payment_mode: str = "BANK_TRANSFER",
+        payment_date: Optional[str] = None,
+        amount: Optional[float] = None,
+        reference_no: Optional[str] = None,
+        narration: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Tuple[int, str, bool]:
+        """
+        Record payment to supplier atomically with optional idempotency protection:
+        1. Validate idempotency key and compute canonical fingerprint BEFORE defaulting payment_date.
+        2. Inside BEGIN IMMEDIATE, replay existing voucher on match or raise IdempotencyConflictError on mismatch.
+        3. Verify supplier exists, reduce supplier payable, and post balanced PAYMENT voucher atomically.
+        Returns (voucher_id, voucher_no, idempotent_replay).
+        """
+        raw_key = idempotency_key if idempotency_key is not None else kwargs.get("idempotency_key")
+        validated_key = validate_optional_idempotency_key(raw_key)
 
-            vch_no = self.accounting_repo.generate_next_voucher_no("RECEIPT")
-            entries = [
-                LedgerEntry(
-                    account_id=pay_ac.account_id,
-                    debit_amount=amount,
-                    credit_amount=0.0,
-                    particulars=f"Receipt from Customer #{customer_id}",
-                ),
-                LedgerEntry(
-                    account_id=pay_ac.account_id,  # or customer linked ledger account
-                    debit_amount=0.0,
-                    credit_amount=amount,
-                    particulars=f"Credit to Customer #{customer_id}",
-                ),
-            ]
-            voucher = Voucher(
-                voucher_no=vch_no,
-                voucher_date=receipt_date,
-                voucher_type="RECEIPT",
-                total_amount=amount,
-                narration=narration or f"Payment received from customer #{customer_id}",
-                reference_type="MANUAL",
-                reference_id=customer_id,
-                entries=entries,
-            )
-            return self.accounting_repo.create_voucher(voucher, conn=conn)
+        # Resolve amount
+        final_amount: Optional[float] = None
+        if amount is not None:
+            final_amount = float(amount)
+        elif "amount" in kwargs:
+            final_amount = float(kwargs["amount"])
+        elif isinstance(arg1, (int, float)) and not isinstance(arg1, bool):
+            final_amount = float(arg1)
+        elif isinstance(arg2, (int, float)) and not isinstance(arg2, bool):
+            final_amount = float(arg2)
+
+        if final_amount is None or final_amount <= 0:
+            raise ValueError("Payment amount must be greater than 0.")
+
+        # Resolve raw payment_date (keep None when omitted so next-day replay does not false-conflict)
+        raw_date: Optional[str] = None
+        if payment_date is not None:
+            raw_date = str(payment_date)
+        elif "payment_date" in kwargs and kwargs["payment_date"] is not None:
+            raw_date = str(kwargs["payment_date"])
+        elif isinstance(arg1, str) and ("-" in arg1 or "/" in arg1):
+            raw_date = arg1
+        elif isinstance(arg2, str) and ("-" in arg2 or "/" in arg2):
+            raw_date = arg2
+
+        # Resolve payment_mode
+        final_mode = kwargs.get("payment_mode", payment_mode)
+        if isinstance(arg2, str) and not ("-" in arg2 or "/" in arg2):
+            final_mode = arg2
+
+        final_ref = kwargs.get("reference_no", reference_no)
+        final_narration = kwargs.get("narration", narration)
+
+        fingerprint = _compute_supplier_payment_fingerprint(
+            supplier_id=supplier_id,
+            raw_payment_date=raw_date,
+            amount=final_amount,
+            payment_mode=final_mode,
+            reference_no=final_ref,
+            narration=final_narration,
+        )
+
+        try:
+            with self.db.transaction(mode="IMMEDIATE") as conn:
+                if validated_key is not None:
+                    existing = self.accounting_repo.get_voucher_by_idempotency_key(validated_key, conn=conn)
+                    if existing is not None:
+                        if existing.get("request_fingerprint") == fingerprint:
+                            return int(existing["voucher_id"]), str(existing["voucher_no"]), True
+                        raise IdempotencyConflictError(
+                            f"Idempotency key '{validated_key}' was already used with a different request payload."
+                        )
+
+                cursor = conn.cursor()
+                try:
+                    cursor.execute("SELECT supplier_name FROM suppliers WHERE supplier_id = ?;", (supplier_id,))
+                    row = cursor.fetchone()
+                finally:
+                    cursor.close()
+                if not row:
+                    raise ValueError(f"Supplier ID {supplier_id} not found.")
+                supp_name = row["supplier_name"]
+
+                final_date = clean_str(raw_date) or datetime.now().strftime("%Y-%m-%d")
+
+                cash_ac = self.accounting_repo.get_cash_account(conn=conn)
+                bank_ac = self.accounting_repo.get_bank_account(conn=conn)
+                creditors_ac = self.accounting_repo.get_creditors_account(conn=conn)
+                pay_ac = cash_ac if (clean_str(final_mode) or "BANK_TRANSFER").upper() in ("CASH", "SPLIT") else bank_ac
+
+                # Reduce supplier payable balance
+                self.master_repo.update_supplier_balance(supplier_id, -final_amount, conn=conn)
+
+                vch_no = self.accounting_repo.generate_next_voucher_no("PAYMENT", conn=conn)
+                entries = [
+                    LedgerEntry(
+                        account_id=creditors_ac.account_id,
+                        debit_amount=round(final_amount, 2),
+                        credit_amount=0.0,
+                        particulars=f"Debit to Supplier #{supplier_id} ({supp_name})",
+                    ),
+                    LedgerEntry(
+                        account_id=pay_ac.account_id,
+                        debit_amount=0.0,
+                        credit_amount=round(final_amount, 2),
+                        particulars=f"Paid via {final_mode} ref: {final_ref or 'Direct'}",
+                    ),
+                ]
+                voucher = Voucher(
+                    voucher_no=vch_no,
+                    voucher_date=final_date,
+                    voucher_type="PAYMENT",
+                    total_amount=round(final_amount, 2),
+                    narration=final_narration or f"Payment to {supp_name} - Mode: {final_mode}",
+                    reference_type="PURCHASE",
+                    reference_id=supplier_id,
+                    idempotency_key=validated_key,
+                    entries=entries,
+                )
+                if validated_key is not None:
+                    vch_id = self.accounting_repo.create_voucher(
+                        voucher,
+                        conn=conn,
+                        idempotency_key=validated_key,
+                        request_fingerprint=fingerprint,
+                    )
+                else:
+                    vch_id = self.accounting_repo.create_voucher(voucher, conn=conn)
+                return vch_id, vch_no, False
+        except sqlite3.IntegrityError:
+            if validated_key is not None:
+                existing = self.accounting_repo.get_voucher_by_idempotency_key(validated_key)
+                if existing is not None:
+                    if existing.get("request_fingerprint") == fingerprint:
+                        return int(existing["voucher_id"]), str(existing["voucher_no"]), True
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{validated_key}' was already used with a different request payload."
+                    )
+            raise
 
     def record_supplier_payment(
         self,
         supplier_id: int,
-        payment_date: str,
-        amount: float,
+        arg1: Any = None,
+        arg2: Any = None,
         payment_mode: str = "BANK_TRANSFER",
+        payment_date: Optional[str] = None,
+        amount: Optional[float] = None,
+        reference_no: Optional[str] = None,
         narration: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        **kwargs: Any,
     ) -> int:
+        """Record payment to supplier and return voucher_id (backward-compatible wrapper)."""
+        vch_id, _vch_no, _is_replay = self.record_supplier_payment_with_status(
+            supplier_id,
+            arg1,
+            arg2,
+            payment_mode=payment_mode,
+            payment_date=payment_date,
+            amount=amount,
+            reference_no=reference_no,
+            narration=narration,
+            idempotency_key=idempotency_key,
+            **kwargs,
+        )
+        return vch_id
+
+    def record_shop_expense_with_status(
+        self,
+        expense: Expense,
+        payment_mode: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
+        raw_expense_date: Any = _UNSET,
+    ) -> Tuple[int, int, str, bool]:
         """
-        Record payment to supplier:
-        1. Reduce supplier current_balance (payable).
-        2. Post double-entry voucher (Debit Supplier/Accounts Payable, Credit Bank/Cash).
+        Record operational expense and linked double-entry PAYMENT voucher atomically with idempotency.
+        The `expenses` row is the single idempotency authority; the child EXPENSE voucher stores NULL key.
+        Returns (expense_id, voucher_id, voucher_no, idempotent_replay).
         """
-        cash_ac = self.accounting_repo.get_account_by_name("Cash in Hand")
-        bank_ac = self.accounting_repo.get_account_by_name("Bank Account")
-        pay_ac = cash_ac if payment_mode == "CASH" else bank_ac
+        raw_key = idempotency_key if idempotency_key is not None else expense.idempotency_key
+        validated_key = validate_optional_idempotency_key(raw_key)
 
-        with self.db.transaction() as conn:
-            # Reduce supplier balance
-            self.master_repo.update_supplier_balance(supplier_id, -amount, conn=conn)
+        if expense.amount <= 0:
+            raise ValueError("Expense amount must be greater than 0.")
 
-            vch_no = self.accounting_repo.generate_next_voucher_no("PAYMENT")
-            entries = [
-                LedgerEntry(
-                    account_id=pay_ac.account_id,
-                    debit_amount=amount,
-                    credit_amount=0.0,
-                    particulars=f"Debit to Supplier #{supplier_id}",
-                ),
-                LedgerEntry(
-                    account_id=pay_ac.account_id,
-                    debit_amount=0.0,
-                    credit_amount=amount,
-                    particulars=f"Payment to Supplier #{supplier_id}",
-                ),
-            ]
-            voucher = Voucher(
-                voucher_no=vch_no,
-                voucher_date=payment_date,
-                voucher_type="PAYMENT",
-                total_amount=amount,
-                narration=narration or f"Payment to supplier #{supplier_id}",
-                reference_type="MANUAL",
-                reference_id=supplier_id,
-                entries=entries,
-            )
-            return self.accounting_repo.create_voucher(voucher, conn=conn)
+        fp_date = expense.expense_date if raw_expense_date is _UNSET else raw_expense_date
+        raw_payment_account_id = expense.payment_account_id
 
-    def record_shop_expense(self, expense: Expense) -> int:
-        """Record operational expense and update cash/bank ledger."""
-        cash_ac = self.accounting_repo.get_account_by_name("Cash in Hand")
-        pay_ac_id = expense.payment_account_id or (cash_ac.account_id if cash_ac else 1)
-        expense.payment_account_id = pay_ac_id
+        fingerprint = _compute_shop_expense_fingerprint(
+            category_id=expense.category_id,
+            amount=expense.amount,
+            raw_expense_date=fp_date,
+            payment_mode=payment_mode,
+            payment_account_id=raw_payment_account_id,
+            reference_no=expense.reference_no,
+            remarks=expense.remarks,
+        )
 
-        with self.db.transaction() as conn:
-            expense_id = self.accounting_repo.create_expense(expense)
+        try:
+            with self.db.transaction(mode="IMMEDIATE") as conn:
+                if validated_key is not None:
+                    existing = self.accounting_repo.get_expense_by_idempotency_key(validated_key, conn=conn)
+                    if existing is not None:
+                        if existing.get("request_fingerprint") == fingerprint:
+                            return (
+                                int(existing["expense_id"]),
+                                int(existing["voucher_id"]) if existing.get("voucher_id") is not None else 0,
+                                str(existing["voucher_no"] or ""),
+                                True,
+                            )
+                        raise IdempotencyConflictError(
+                            f"Idempotency key '{validated_key}' was already used with a different request payload."
+                        )
 
-            # Post double-entry voucher for expense
-            vch_no = self.accounting_repo.generate_next_voucher_no("PAYMENT")
-            entries = [
-                LedgerEntry(
-                    account_id=pay_ac_id,
-                    debit_amount=expense.amount,
-                    credit_amount=0.0,
-                    particulars=f"Expense: {expense.remarks or 'Shop operational expense'}",
-                ),
-                LedgerEntry(
-                    account_id=pay_ac_id,
-                    debit_amount=0.0,
-                    credit_amount=expense.amount,
-                    particulars="Cash/Bank paid for expense",
-                ),
-            ]
-            vch = Voucher(
-                voucher_no=vch_no,
-                voucher_date=expense.expense_date,
-                voucher_type="PAYMENT",
-                total_amount=expense.amount,
-                narration=expense.remarks,
-                reference_type="EXPENSE",
-                reference_id=expense_id,
-                entries=entries,
-            )
-            self.accounting_repo.create_voucher(vch, conn=conn)
-            return expense_id
+                cash_ac = self.accounting_repo.get_cash_account(conn=conn)
+                bank_ac = self.accounting_repo.get_bank_account(conn=conn)
+
+                if raw_payment_account_id is not None:
+                    pay_ac_id = raw_payment_account_id
+                elif payment_mode is not None:
+                    mode_norm = payment_mode.strip().upper()
+                    if mode_norm == "CASH":
+                        pay_ac_id = cash_ac.account_id
+                    elif mode_norm in ("UPI", "BANK_TRANSFER", "BANK", "CARD", "CHEQUE"):
+                        pay_ac_id = bank_ac.account_id
+                    else:
+                        raise ValueError(
+                            f"Unsupported payment mode '{payment_mode}' for daily expense. "
+                            f"Supported modes: CASH, UPI, BANK_TRANSFER, BANK, CARD, CHEQUE."
+                        )
+                else:
+                    pay_ac_id = cash_ac.account_id
+                expense.payment_account_id = pay_ac_id
+
+                final_date = clean_str(expense.expense_date) or datetime.now().strftime("%Y-%m-%d")
+                expense.expense_date = final_date
+
+                # Look up category name if category_id given
+                cat_name = None
+                if expense.category_id:
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute(
+                            "SELECT category_name FROM expense_categories WHERE category_id = ?;",
+                            (expense.category_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            cat_name = row["category_name"]
+                    finally:
+                        cursor.close()
+
+                expense_ac = self.accounting_repo.get_expense_account(cat_name, conn=conn)
+
+                # Persist expense record with idempotency key & fingerprint (when key supplied)
+                if validated_key is not None:
+                    expense_id = self.accounting_repo.create_expense(
+                        expense,
+                        conn=conn,
+                        idempotency_key=validated_key,
+                        request_fingerprint=fingerprint,
+                    )
+                else:
+                    expense_id = self.accounting_repo.create_expense(expense, conn=conn)
+
+                # Post double-entry voucher for expense (child voucher MUST NOT carry idempotency_key)
+                vch_no = self.accounting_repo.generate_next_voucher_no("PAYMENT", conn=conn)
+                entries = [
+                    LedgerEntry(
+                        account_id=expense_ac.account_id,
+                        debit_amount=round(expense.amount, 2),
+                        credit_amount=0.0,
+                        particulars=f"Expense: {expense.remarks or cat_name or 'Shop operational expense'}",
+                    ),
+                    LedgerEntry(
+                        account_id=pay_ac_id,
+                        debit_amount=0.0,
+                        credit_amount=round(expense.amount, 2),
+                        particulars="Cash/Bank paid for expense",
+                    ),
+                ]
+                vch = Voucher(
+                    voucher_no=vch_no,
+                    voucher_date=final_date,
+                    voucher_type="PAYMENT",
+                    total_amount=round(expense.amount, 2),
+                    narration=expense.remarks or f"Expense for {cat_name or 'Operations'}",
+                    reference_type="EXPENSE",
+                    reference_id=expense_id,
+                    idempotency_key=None,
+                    entries=entries,
+                )
+                voucher_id = self.accounting_repo.create_voucher(vch, conn=conn)
+                return expense_id, voucher_id, vch_no, False
+        except sqlite3.IntegrityError:
+            if validated_key is not None:
+                existing = self.accounting_repo.get_expense_by_idempotency_key(validated_key)
+                if existing is not None:
+                    if existing.get("request_fingerprint") == fingerprint:
+                        return (
+                            int(existing["expense_id"]),
+                            int(existing["voucher_id"]) if existing.get("voucher_id") is not None else 0,
+                            str(existing["voucher_no"] or ""),
+                            True,
+                        )
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{validated_key}' was already used with a different request payload."
+                    )
+            raise
+
+    def record_shop_expense(
+        self,
+        expense: Expense,
+        payment_mode: Optional[str] = None,
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> int:
+        """Record operational expense and return expense_id (backward-compatible wrapper)."""
+        exp_id, _vch_id, _vch_no, _is_replay = self.record_shop_expense_with_status(
+            expense,
+            payment_mode=payment_mode,
+            idempotency_key=idempotency_key,
+        )
+        return exp_id
 
     def get_day_book(self, date_str: str) -> Dict[str, Any]:
         """Fetch complete Day Book of cash, bank, sales, purchases, and expenses for a given day."""
@@ -335,7 +732,7 @@ class AccountingService:
             })
         return results
 
-    # ==================== SUPPLIER & DISTRIBUTOR KHATA ====================
+    # ==================== SUPPLIER & DISTRIBUTOR LEDGER ====================
     def get_suppliers_with_balances(self) -> List[Dict[str, Any]]:
         """Fetch all distributors/suppliers with total purchases, paid amounts, and outstanding payable balances."""
         sql = """
@@ -412,70 +809,42 @@ class AccountingService:
             "ledger": ledger,
         }
 
-    def record_supplier_payment(
+    # ==================== DAILY EXPENSES & CASH CLOSING ====================
+    def record_daily_expense_with_status(
         self,
-        supplier_id: int,
+        category_id: int,
         amount: float,
-        payment_mode: str = "BANK_TRANSFER",
-        payment_date: Optional[str] = None,
+        expense_date: Optional[str] = None,
+        payment_mode: str = "CASH",
         reference_no: Optional[str] = None,
-        narration: Optional[str] = None,
-    ) -> int:
+        remarks: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Tuple[int, int, str, bool]:
         """
-        Record payment made to a supplier/distributor:
-        1. Reduce supplier current_balance (payable).
-        2. Post double-entry Payment voucher (Debit Accounts Payable, Credit Bank/Cash).
+        Record an operational shop expense atomically with its balanced double-entry PAYMENT voucher
+        and idempotency protection via record_shop_expense_with_status().
+        Passes raw `expense_date` (None when omitted) so fingerprinting precedes date defaulting.
+        Returns (expense_id, voucher_id, voucher_no, idempotent_replay).
         """
         if amount <= 0:
-            raise ValueError("Payment amount must be greater than 0.")
+            raise ValueError("Expense amount must be greater than 0.")
 
-        supplier = self.db.fetch_one("SELECT * FROM suppliers WHERE supplier_id = ?;", (supplier_id,))
-        if not supplier:
-            raise ValueError(f"Supplier ID {supplier_id} not found.")
+        expense = Expense(
+            category_id=category_id,
+            expense_date=expense_date,
+            amount=amount,
+            payment_account_id=None,
+            reference_no=reference_no,
+            remarks=remarks,
+            idempotency_key=idempotency_key,
+        )
+        return self.record_shop_expense_with_status(
+            expense,
+            payment_mode=payment_mode,
+            idempotency_key=idempotency_key,
+            raw_expense_date=expense_date,
+        )
 
-        today = payment_date or datetime.now().strftime("%Y-%m-%d")
-        cash_ac = self.accounting_repo.get_account_by_name("Cash in Hand")
-        bank_ac = self.accounting_repo.get_account_by_name("Bank Account")
-        pay_ac = cash_ac if payment_mode.upper() == "CASH" else bank_ac
-
-        with self.db.transaction() as conn:
-            # Reduce supplier payable balance
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE suppliers SET current_balance = current_balance - ? WHERE supplier_id = ?;",
-                (amount, supplier_id),
-            )
-
-            # Generate voucher
-            vch_no = self.accounting_repo.generate_next_voucher_no("PAYMENT")
-            entries = [
-                LedgerEntry(
-                    account_id=pay_ac.account_id,
-                    debit_amount=amount,
-                    credit_amount=0.0,
-                    particulars=f"Payment to Supplier #{supplier_id} ({supplier['supplier_name']})",
-                ),
-                LedgerEntry(
-                    account_id=pay_ac.account_id,
-                    debit_amount=0.0,
-                    credit_amount=amount,
-                    particulars=f"Paid via {payment_mode} ref: {reference_no or 'Direct'}",
-                ),
-            ]
-            voucher = Voucher(
-                voucher_no=vch_no,
-                voucher_date=today,
-                voucher_type="PAYMENT",
-                total_amount=amount,
-                narration=narration or f"Payment to {supplier['supplier_name']} - Mode: {payment_mode}",
-                reference_type="PURCHASE",
-                reference_id=supplier_id,
-                entries=entries,
-            )
-            vch_id = self.accounting_repo.create_voucher(voucher, conn=conn)
-            return vch_id
-
-    # ==================== DAILY EXPENSES & CASH CLOSING ====================
     def record_daily_expense(
         self,
         category_id: int,
@@ -484,25 +853,21 @@ class AccountingService:
         payment_mode: str = "CASH",
         reference_no: Optional[str] = None,
         remarks: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> int:
-        """Record an operational shop expense (Shop Rent, Labor/हमाली, Tea, Electricity, Freight)."""
-        if amount <= 0:
-            raise ValueError("Expense amount must be greater than 0.")
-
-        date_str = expense_date or datetime.now().strftime("%Y-%m-%d")
-        cash_ac = self.accounting_repo.get_account_by_name("Cash in Hand")
-        bank_ac = self.accounting_repo.get_account_by_name("Bank Account")
-        pay_ac_id = cash_ac.account_id if payment_mode.upper() == "CASH" else bank_ac.account_id
-
-        expense = Expense(
+        """
+        Record an operational shop expense and return expense_id (backward-compatible wrapper).
+        """
+        exp_id, _vch_id, _vch_no, _is_replay = self.record_daily_expense_with_status(
             category_id=category_id,
-            expense_date=date_str,
             amount=amount,
-            payment_account_id=pay_ac_id,
+            expense_date=expense_date,
+            payment_mode=payment_mode,
             reference_no=reference_no,
             remarks=remarks,
+            idempotency_key=idempotency_key,
         )
-        return self.accounting_repo.create_expense(expense)
+        return exp_id
 
     def get_expense_categories(self) -> List[Dict[str, Any]]:
         """Fetch all operational expense categories."""
@@ -544,13 +909,17 @@ class AccountingService:
         )
         cash_expenses = float(cash_exp_row["total"]) if cash_exp_row else 0.0
 
-        # 4. Cash Supplier Payments (Credit Cash in Hand Account 1)
+        # 4. Cash Supplier Payments (Credit Cash in Hand Account 1; exclude EXPENSE vouchers already counted above)
         cash_supp_row = self.db.fetch_one(
             """
             SELECT COALESCE(SUM(DISTINCT v.total_amount), 0) as total 
             FROM vouchers v 
             JOIN ledger_entries le ON v.voucher_id = le.voucher_id
-            WHERE v.voucher_date = ? AND v.voucher_type = 'PAYMENT' AND le.account_id = 1 AND le.credit_amount > 0;
+            WHERE v.voucher_date = ?
+              AND v.voucher_type = 'PAYMENT'
+              AND UPPER(COALESCE(v.reference_type, '')) != 'EXPENSE'
+              AND le.account_id = 1
+              AND le.credit_amount > 0;
             """,
             (date_str,),
         )

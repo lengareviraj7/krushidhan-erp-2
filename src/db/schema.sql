@@ -204,7 +204,9 @@ CREATE TABLE IF NOT EXISTS purchases (
     paid_amount REAL DEFAULT 0,
     due_amount REAL DEFAULT 0,
     remarks TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
+    request_fingerprint TEXT
 );
 
 -- Purchase Items / Line Items
@@ -239,29 +241,130 @@ CREATE TABLE IF NOT EXISTS purchase_returns (
     return_id INTEGER PRIMARY KEY AUTOINCREMENT,
     return_no TEXT NOT NULL UNIQUE,
     return_date TEXT NOT NULL,
-    purchase_id INTEGER REFERENCES purchases(purchase_id),
-    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id),
+    purchase_id INTEGER NOT NULL REFERENCES purchases(purchase_id) ON DELETE RESTRICT,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
     total_taxable REAL DEFAULT 0,
+    total_cgst REAL CHECK (total_cgst IS NULL OR total_cgst >= 0),
+    total_sgst REAL CHECK (total_sgst IS NULL OR total_sgst >= 0),
+    total_igst REAL CHECK (total_igst IS NULL OR total_igst >= 0),
     total_tax REAL DEFAULT 0,
     round_off REAL DEFAULT 0,
     net_amount REAL NOT NULL,
+    supplier_credit_note_no TEXT,
+    supplier_credit_note_date TEXT,
     remarks TEXT,
+    status TEXT CHECK (status IS NULL OR status IN ('POSTED', 'CANCELLED')),
+    itc_status TEXT CHECK (itc_status IS NULL OR itc_status IN ('CLAIMED_REVERSED', 'NOT_CLAIMED', 'PENDING_CONFIRMATION', 'CONFIRMED_REVERSED')),
+    voucher_id INTEGER UNIQUE REFERENCES vouchers(voucher_id) ON DELETE RESTRICT,
+    itc_adjustment_voucher_id INTEGER UNIQUE REFERENCES vouchers(voucher_id) ON DELETE RESTRICT,
+    reversal_voucher_id INTEGER UNIQUE REFERENCES vouchers(voucher_id) ON DELETE RESTRICT,
+    itc_adjustment_reversal_voucher_id INTEGER UNIQUE REFERENCES vouchers(voucher_id) ON DELETE RESTRICT,
+    cancelled_at TEXT,
+    cancel_reason TEXT,
+    idempotency_key TEXT UNIQUE,
+    request_fingerprint TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Purchase Return Line Items
 CREATE TABLE IF NOT EXISTS purchase_return_items (
     return_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    return_id INTEGER NOT NULL REFERENCES purchase_returns(return_id) ON DELETE CASCADE,
-    product_id INTEGER NOT NULL REFERENCES products(product_id),
-    batch_id INTEGER REFERENCES stock_batches(batch_id),
-    qty REAL NOT NULL,
-    purchase_rate REAL NOT NULL,
-    taxable_amount REAL NOT NULL,
-    tax_amount REAL DEFAULT 0,
-    total_amount REAL NOT NULL,
+    return_id INTEGER NOT NULL REFERENCES purchase_returns(return_id) ON DELETE RESTRICT,
+    purchase_item_id INTEGER REFERENCES purchase_items(item_id) ON DELETE RESTRICT,
+    product_id INTEGER NOT NULL REFERENCES products(product_id) ON DELETE RESTRICT,
+    batch_id INTEGER REFERENCES stock_batches(batch_id) ON DELETE RESTRICT,
+    qty REAL NOT NULL CHECK (qty > 0),
+    purchase_rate REAL NOT NULL CHECK (purchase_rate >= 0),
+    discount_amount REAL CHECK (discount_amount IS NULL OR discount_amount >= 0),
+    net_rate REAL CHECK (net_rate IS NULL OR net_rate >= 0),
+    taxable_amount REAL NOT NULL CHECK (taxable_amount >= 0),
+    cgst_rate REAL CHECK (cgst_rate IS NULL OR cgst_rate >= 0),
+    cgst_amount REAL CHECK (cgst_amount IS NULL OR cgst_amount >= 0),
+    sgst_rate REAL CHECK (sgst_rate IS NULL OR sgst_rate >= 0),
+    sgst_amount REAL CHECK (sgst_amount IS NULL OR sgst_amount >= 0),
+    igst_rate REAL CHECK (igst_rate IS NULL OR igst_rate >= 0),
+    igst_amount REAL CHECK (igst_amount IS NULL OR igst_amount >= 0),
+    tax_amount REAL DEFAULT 0 CHECK (tax_amount >= 0),
+    total_amount REAL NOT NULL CHECK (total_amount >= 0),
     reason TEXT
 );
+
+-- Supplier Credit Notes (Arising from Returns / Adjustments)
+CREATE TABLE IF NOT EXISTS supplier_credits (
+    credit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credit_no TEXT NOT NULL UNIQUE,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
+    return_id INTEGER NOT NULL REFERENCES purchase_returns(return_id) ON DELETE RESTRICT,
+    credit_date TEXT NOT NULL,
+    original_amount REAL NOT NULL CHECK (original_amount > 0),
+    balance_amount REAL NOT NULL CHECK (balance_amount >= 0 AND balance_amount <= original_amount),
+    status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'PARTIALLY_USED', 'FULLY_USED', 'CANCELLED')),
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_credits_return_id ON supplier_credits(return_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_credits_supplier ON supplier_credits(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_credits_status ON supplier_credits(status);
+
+-- Purchase Return Multi-Settlement Allocations
+CREATE TABLE IF NOT EXISTS purchase_return_settlements (
+    settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    return_id INTEGER NOT NULL REFERENCES purchase_returns(return_id) ON DELETE RESTRICT,
+    settlement_type TEXT NOT NULL CHECK (settlement_type IN ('PAYABLE_REDUCTION', 'REFUND_CASH', 'REFUND_BANK', 'SUPPLIER_CREDIT')),
+    amount REAL NOT NULL CHECK (amount > 0),
+    account_id INTEGER REFERENCES ledger_accounts(account_id) ON DELETE RESTRICT,
+    credit_id INTEGER REFERENCES supplier_credits(credit_id) ON DELETE RESTRICT,
+    reference_no TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (settlement_type = 'SUPPLIER_CREDIT' AND credit_id IS NOT NULL) OR
+        (settlement_type != 'SUPPLIER_CREDIT' AND credit_id IS NULL)
+    ),
+    CHECK (
+        (settlement_type IN ('REFUND_CASH', 'REFUND_BANK') AND account_id IS NOT NULL) OR
+        (settlement_type NOT IN ('REFUND_CASH', 'REFUND_BANK'))
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_settlements_return ON purchase_return_settlements(return_id);
+CREATE INDEX IF NOT EXISTS idx_pr_settlements_credit ON purchase_return_settlements(credit_id);
+CREATE INDEX IF NOT EXISTS idx_pr_settlements_account ON purchase_return_settlements(account_id);
+
+
+CREATE INDEX IF NOT EXISTS idx_purchase_returns_purchase ON purchase_returns(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_returns_supplier ON purchase_returns(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_returns_date ON purchase_returns(return_date);
+
+CREATE INDEX IF NOT EXISTS idx_pr_items_return ON purchase_return_items(return_id);
+CREATE INDEX IF NOT EXISTS idx_pr_items_batch ON purchase_return_items(batch_id);
+CREATE INDEX IF NOT EXISTS idx_pr_items_product ON purchase_return_items(product_id);
+
+-- Immutability Triggers (Preventing Financial Hard Deletes)
+CREATE TRIGGER IF NOT EXISTS trg_prevent_purchase_returns_delete
+BEFORE DELETE ON purchase_returns
+BEGIN
+    SELECT RAISE(ABORT, 'Financial audit protection: Deletion of purchase returns is prohibited. Use cancellation reversal workflow.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_prevent_purchase_return_items_delete
+BEFORE DELETE ON purchase_return_items
+BEGIN
+    SELECT RAISE(ABORT, 'Financial audit protection: Deletion of purchase return items is prohibited.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_prevent_purchase_return_settlements_delete
+BEFORE DELETE ON purchase_return_settlements
+BEGIN
+    SELECT RAISE(ABORT, 'Financial audit protection: Deletion of purchase return settlements is prohibited.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_prevent_supplier_credits_delete
+BEFORE DELETE ON supplier_credits
+BEGIN
+    SELECT RAISE(ABORT, 'Financial audit protection: Deletion of supplier credits is prohibited.');
+END;
 
 
 -- ------------------------------------------------------------
@@ -288,7 +391,9 @@ CREATE TABLE IF NOT EXISTS sales (
     due_amount REAL DEFAULT 0,
     print_count INTEGER DEFAULT 0,
     remarks TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
+    request_fingerprint TEXT
 );
 
 -- Sale Line Items
@@ -369,7 +474,9 @@ CREATE TABLE IF NOT EXISTS vouchers (
     narration TEXT,
     reference_type TEXT,        -- 'SALE', 'PURCHASE', 'EXPENSE', 'MANUAL'
     reference_id INTEGER,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
+    request_fingerprint TEXT
 );
 
 -- Double-Entry Ledger Posting Entries
@@ -400,7 +507,9 @@ CREATE TABLE IF NOT EXISTS expenses (
     payment_account_id INTEGER REFERENCES ledger_accounts(account_id),
     reference_no TEXT,
     remarks TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    idempotency_key TEXT,
+    request_fingerprint TEXT
 );
 
 

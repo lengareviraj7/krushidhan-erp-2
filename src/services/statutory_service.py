@@ -1,9 +1,9 @@
 """
 Statutory Agricultural Department Registers & Compliance Service.
 Generates inspection-ready registers for:
-1. Fertilizer Stock & Sale Register (खत विक्री नोंदवही - FCO Compliance)
-2. Insecticide & Pesticide Sale Register (कीटकनाशक विक्री नोंदवही - Insecticides Act)
-3. Seed Sale Register (बियाणे विक्री नोंदवही - Seeds Act)
+1. Fertilizer Stock & Sale Register (FCO Compliance)
+2. Insecticide & Pesticide Sale Register (Insecticides Act)
+3. Seed Sale Register (Seeds Act)
 """
 from __future__ import annotations
 

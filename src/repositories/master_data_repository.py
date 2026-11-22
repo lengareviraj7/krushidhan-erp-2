@@ -100,7 +100,7 @@ class MasterDataRepository(BaseRepository):
         return [Crop(**dict(r)) for r in rows]
 
     # ---------------- Products CRUD ----------------
-    def create_product(self, prod: Product) -> int:
+    def create_product(self, prod: Product, conn: Optional[sqlite3.Connection] = None) -> int:
         sql = """
             INSERT INTO products (
                 product_name, category_id, manufacturer_id, hsn_code, unit_id,
@@ -108,26 +108,32 @@ class MasterDataRepository(BaseRepository):
                 min_stock_alert, crop_id, is_active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
-        with self.db.transaction() as conn:
+        params = (
+            prod.product_name,
+            prod.category_id,
+            prod.manufacturer_id,
+            prod.hsn_code,
+            prod.unit_id,
+            prod.tax_group_id,
+            prod.default_purchase_rate,
+            prod.default_sale_rate,
+            prod.default_mrp,
+            prod.min_stock_alert,
+            prod.crop_id,
+            prod.is_active,
+        )
+        if conn is not None:
             cursor = conn.cursor()
-            cursor.execute(
-                sql,
-                (
-                    prod.product_name,
-                    prod.category_id,
-                    prod.manufacturer_id,
-                    prod.hsn_code,
-                    prod.unit_id,
-                    prod.tax_group_id,
-                    prod.default_purchase_rate,
-                    prod.default_sale_rate,
-                    prod.default_mrp,
-                    prod.min_stock_alert,
-                    prod.crop_id,
-                    prod.is_active,
-                ),
-            )
-            return cursor.lastrowid
+            try:
+                cursor.execute(sql, params)
+                return int(cursor.lastrowid)
+            finally:
+                cursor.close()
+
+        with self.db.transaction() as tx_conn:
+            cursor = tx_conn.cursor()
+            cursor.execute(sql, params)
+            return int(cursor.lastrowid)
 
     def update_product(self, prod: Product) -> None:
         sql = """
@@ -171,7 +177,7 @@ class MasterDataRepository(BaseRepository):
                 c.category_name, 
                 m.manufacturer_name, 
                 u.symbol as unit_symbol,
-                tg.cgst_rate, tg.sgst_rate, tg.igst_rate,
+                tg.tax_group_name, tg.cgst_rate, tg.sgst_rate, tg.igst_rate,
                 COALESCE(SUM(sb.current_qty), 0) as total_stock
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
@@ -196,7 +202,7 @@ class MasterDataRepository(BaseRepository):
             return cursor.rowcount > 0
 
     # ---------------- Customers CRUD ----------------
-    def create_customer(self, cust: Customer) -> int:
+    def create_customer(self, cust: Customer, conn: Optional[sqlite3.Connection] = None) -> int:
         sql = """
             INSERT INTO customers (
                 customer_name, mobile, village, taluka, district, state,
@@ -204,30 +210,47 @@ class MasterDataRepository(BaseRepository):
                 credit_limit, is_active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
-        with self.db.transaction() as conn:
+        params = (
+            cust.customer_name,
+            cust.mobile,
+            cust.village,
+            cust.taluka,
+            cust.district,
+            cust.state,
+            cust.aadhar_no,
+            cust.gstin,
+            cust.group_id,
+            cust.opening_balance,
+            cust.opening_balance,  # current_balance starts at opening_balance
+            cust.credit_limit,
+            cust.is_active,
+        )
+        if conn is not None:
             cursor = conn.cursor()
-            cursor.execute(
-                sql,
-                (
-                    cust.customer_name,
-                    cust.mobile,
-                    cust.village,
-                    cust.taluka,
-                    cust.district,
-                    cust.state,
-                    cust.aadhar_no,
-                    cust.gstin,
-                    cust.group_id,
-                    cust.opening_balance,
-                    cust.opening_balance,  # current_balance starts at opening_balance
-                    cust.credit_limit,
-                    cust.is_active,
-                ),
-            )
-            return cursor.lastrowid
+            try:
+                cursor.execute(sql, params)
+                return int(cursor.lastrowid)
+            finally:
+                cursor.close()
 
-    def get_customer_by_id(self, customer_id: int) -> Optional[Customer]:
-        row = self.db.fetch_one("SELECT * FROM customers WHERE customer_id = ?;", (customer_id,))
+        with self.db.transaction() as tx_conn:
+            cursor = tx_conn.cursor()
+            cursor.execute(sql, params)
+            return int(cursor.lastrowid)
+
+    def get_customer_by_id(
+        self, customer_id: int, conn: Optional[sqlite3.Connection] = None
+    ) -> Optional[Customer]:
+        sql = "SELECT * FROM customers WHERE customer_id = ?;"
+        if conn is not None:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(sql, (customer_id,))
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            return Customer(**dict(row)) if row else None
+        row = self.db.fetch_one(sql, (customer_id,))
         return Customer(**dict(row)) if row else None
 
     def search_customers(self, query: str = "") -> List[Customer]:
@@ -369,7 +392,7 @@ class MasterDataRepository(BaseRepository):
                 c.execute(sql, (delta_amount, customer_id))
 
     # ---------------- Suppliers CRUD ----------------
-    def create_supplier(self, supp: Supplier) -> int:
+    def create_supplier(self, supp: Supplier, conn: Optional[sqlite3.Connection] = None) -> int:
         sql = """
             INSERT INTO suppliers (
                 supplier_name, contact_person, mobile, email, address, city,
@@ -377,30 +400,39 @@ class MasterDataRepository(BaseRepository):
                 opening_balance, current_balance, is_active
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
-        with self.db.transaction() as conn:
+        params = (
+            supp.supplier_name,
+            supp.contact_person,
+            supp.mobile,
+            supp.email,
+            supp.address,
+            supp.city,
+            supp.state,
+            supp.gstin,
+            supp.pan,
+            supp.dl_number,
+            supp.bank_name,
+            supp.account_no,
+            supp.ifsc_code,
+            supp.opening_balance,
+            supp.opening_balance,
+            supp.is_active,
+        )
+        if conn is not None:
             cursor = conn.cursor()
-            cursor.execute(
-                sql,
-                (
-                    supp.supplier_name,
-                    supp.contact_person,
-                    supp.mobile,
-                    supp.email,
-                    supp.address,
-                    supp.city,
-                    supp.state,
-                    supp.gstin,
-                    supp.pan,
-                    supp.dl_number,
-                    supp.bank_name,
-                    supp.account_no,
-                    supp.ifsc_code,
-                    supp.opening_balance,
-                    supp.opening_balance,
-                    supp.is_active,
-                ),
-            )
-            return cursor.lastrowid
+            try:
+                cursor.execute(sql, params)
+                return cursor.lastrowid
+            finally:
+                cursor.close()
+
+        with self.db.transaction() as c:
+            cursor = c.cursor()
+            try:
+                cursor.execute(sql, params)
+                return cursor.lastrowid
+            finally:
+                cursor.close()
 
     def get_supplier_by_id(self, supplier_id: int) -> Optional[Supplier]:
         row = self.db.fetch_one("SELECT * FROM suppliers WHERE supplier_id = ?;", (supplier_id,))

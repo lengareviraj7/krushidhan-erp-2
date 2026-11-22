@@ -15,7 +15,18 @@ from src.models.master_data import (
     UnitConversion,
 )
 from src.models.inventory import StockBatch, StockLedgerEntry
-from src.models.purchase import Purchase, PurchaseItem, PurchaseReturn, PurchaseReturnItem
+from src.models.purchase import (
+    Purchase,
+    PurchaseItem,
+    PurchaseReturn,
+    PurchaseReturnCreate,
+    PurchaseReturnItem,
+    PurchaseReturnItemCreate,
+    PurchaseReturnSettlement,
+    PurchaseReturnSettlementCreate,
+    SupplierCredit,
+    SupplierCreditCreate,
+)
 from src.models.sales import Sale, SaleItem, SalesReturn, SalesReturnItem
 from src.models.accounting import Expense, ExpenseCategory, LedgerAccount, LedgerEntry, Voucher
 from src.models.system import AuditLogEntry, BackupLogEntry, CompanySettings, User
@@ -38,6 +49,12 @@ __all__ = [
     "PurchaseItem",
     "PurchaseReturn",
     "PurchaseReturnItem",
+    "PurchaseReturnCreate",
+    "PurchaseReturnItemCreate",
+    "PurchaseReturnSettlement",
+    "PurchaseReturnSettlementCreate",
+    "SupplierCredit",
+    "SupplierCreditCreate",
     "Sale",
     "SaleItem",
     "SalesReturn",
